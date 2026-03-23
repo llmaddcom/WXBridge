@@ -63,7 +63,7 @@ def parse_messages_from_raw(raw: list[dict[str, Any]]) -> list[WeixinMessage]:
         result.append(
             WeixinMessage(
                 seq=m.get("seq", 0),
-                message_id=m.get("message_id", ""),
+                message_id=str(m.get("message_id", "")),
                 from_user_id=m.get("from_user_id", ""),
                 to_user_id=m.get("to_user_id", ""),
                 create_time_ms=m.get("create_time_ms", 0),
