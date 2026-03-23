@@ -4,6 +4,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from wxbridge import DictStorage, WeixinBridge, WeixinMessage
@@ -35,7 +36,7 @@ async def test_handle_message_calls_adapter(
     ilink.sendmessage = AsyncMock(return_value=True)
 
     msg = make_message(text="hello")
-    await bridge._handle_message(ilink, msg)
+    await bridge._handle_message(MagicMock(spec=httpx.AsyncClient), ilink, msg)
 
     assert len(mock_adapter.calls) == 1
     assert mock_adapter.calls[0].text == "hello"
@@ -51,7 +52,7 @@ async def test_handle_message_non_text_skipped(
     ilink.sendmessage = AsyncMock()
 
     msg = make_message(text=None)  # 无文本
-    await bridge._handle_message(ilink, msg)
+    await bridge._handle_message(MagicMock(spec=httpx.AsyncClient), ilink, msg)
 
     assert mock_adapter.calls == []
     ilink.sendmessage.assert_not_awaited()
@@ -67,7 +68,7 @@ async def test_handle_message_empty_reply_not_sent(
     ilink.sendmessage = AsyncMock()
 
     msg = make_message(text="ping")
-    await bridge._handle_message(ilink, msg)
+    await bridge._handle_message(MagicMock(spec=httpx.AsyncClient), ilink, msg)
 
     ilink.sendmessage.assert_not_awaited()
 
@@ -185,7 +186,7 @@ async def test_handle_message_exception_does_not_crash(
 
     msg = make_message(text="trigger error")
     # _handle_message 内部捕获异常，不应 raise
-    await bridge._handle_message(ilink, msg)
+    await bridge._handle_message(MagicMock(spec=httpx.AsyncClient), ilink, msg)
 
     ilink.sendmessage.assert_not_awaited()
 

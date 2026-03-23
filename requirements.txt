@@ -1,0 +1,9 @@
+# WXBridge 生产环境依赖
+# 最低 Python 版本: 3.10
+
+# 核心依赖
+httpx==0.28.1
+pydantic==2.12.5
+
+# 生产存储后端（Redis）
+redis==7.0.1

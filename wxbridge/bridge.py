@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
 
 import httpx
 
@@ -27,9 +26,6 @@ from .auth import WeixinAuth
 from .ilink_client import ILinkClient, ILINK_BASE_URL
 from .models import WeixinMessage
 from .storage import Storage, RedisStorage, WEIXIN_CURSOR
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +59,9 @@ class WeixinBridge:
         self._storage: Storage = storage if storage is not None else RedisStorage(redis_url)
         self._session_ttl = session_ttl
         self._auth = WeixinAuth(self._storage)
-        self._task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._task: asyncio.Task[None] | None = None
         self._running = False
+        self._pending_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def is_running(self) -> bool:
@@ -89,8 +86,11 @@ class WeixinBridge:
         logger.info("WeChat bridge 后台任务已启动")
 
     async def stop(self) -> None:
-        """优雅停止桥接（取消后台任务并等待退出）"""
+        """优雅停止桥接（等待进行中的消息处理完成，再取消主循环）"""
         self._running = False
+        # 等待所有进行中的消息处理任务完成
+        if self._pending_tasks:
+            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -110,15 +110,17 @@ class WeixinBridge:
         每次循环：
           1. 从存储读取 bot_token（若无则等待 10s）
           2. 调用 getupdates（最长阻塞 35s）
-          3. 对每条用户消息派发独立 Task
+          3. 对每条用户消息派发独立 Task（复用 HTTP 连接池）
           4. 异常时指数退避，errcode=-14 时清除 token 并停止
         """
         logger.info("WeChat bridge 主循环启动")
         consecutive_errors = 0
+        current_token: str | None = None
+        ilink: ILinkClient | None = None
 
         async with httpx.AsyncClient() as http_client:
             while self._running:
-                # 加载 token（每轮都重新加载，支持 token 刷新）
+                # 加载 token（每轮都重新加载，支持 token 热刷新）
                 token_info = await self._auth.load_token()
                 if not token_info:
                     logger.warning(
@@ -127,12 +129,16 @@ class WeixinBridge:
                     await asyncio.sleep(10)
                     continue
 
-                bot_token, bot_id, base_url = token_info
-                ilink = ILinkClient(bot_token=bot_token, base_url=base_url)
+                bot_token, _bot_id, base_url = token_info
+                # token 未变时复用 ILinkClient，避免重复构造
+                if bot_token != current_token:
+                    ilink = ILinkClient(bot_token=bot_token, base_url=base_url)
+                    current_token = bot_token
+
                 cursor = await self._storage.get(WEIXIN_CURSOR) or ""
 
                 try:
-                    msgs, new_cursor, errcode = await ilink.getupdates(http_client, cursor)
+                    msgs, new_cursor, errcode = await ilink.getupdates(http_client, cursor)  # type: ignore[union-attr]
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -162,12 +168,15 @@ class WeixinBridge:
                     await self._storage.set(WEIXIN_CURSOR, new_cursor)
 
                 # 只处理用户发来的消息（message_type=1），跳过 Bot 自己发出的（message_type=2）
-                user_msgs = [m for m in msgs if m.message_type == 1]
-                for msg in user_msgs:
-                    asyncio.create_task(
-                        self._handle_message(ilink, msg),
+                for msg in msgs:
+                    if msg.message_type != 1:
+                        continue
+                    task: asyncio.Task[None] = asyncio.create_task(
+                        self._handle_message(http_client, ilink, msg),  # type: ignore[union-attr]
                         name=f"weixin_msg_{msg.message_id}",
                     )
+                    self._pending_tasks.add(task)
+                    task.add_done_callback(self._pending_tasks.discard)
 
         logger.info("WeChat bridge 主循环退出")
 
@@ -175,10 +184,13 @@ class WeixinBridge:
     # 单条消息处理
     # ----------------------------------------------------------------
 
-    async def _handle_message(self, ilink: ILinkClient, msg: WeixinMessage) -> None:
+    async def _handle_message(
+        self, http_client: httpx.AsyncClient, ilink: ILinkClient, msg: WeixinMessage
+    ) -> None:
         """
         处理单条用户消息：调用 adapter.reply()，通过 sendmessage 回复用户。
 
+        复用主循环的 httpx.AsyncClient 连接池，避免每条消息建立新 TCP 连接。
         非文本消息（图片/文件/视频）直接跳过。
         """
         text = msg.text
@@ -204,13 +216,12 @@ class WeixinBridge:
                 )
                 return
 
-            async with httpx.AsyncClient() as http_client:
-                ok = await ilink.sendmessage(
-                    client=http_client,
-                    to_user_id=msg.from_user_id,
-                    context_token=msg.context_token,
-                    text=reply,
-                )
+            ok = await ilink.sendmessage(
+                client=http_client,
+                to_user_id=msg.from_user_id,
+                context_token=msg.context_token,
+                text=reply,
+            )
 
             if ok:
                 logger.info(

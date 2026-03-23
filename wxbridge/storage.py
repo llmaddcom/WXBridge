@@ -7,7 +7,6 @@ WXBridge 存储后端
 """
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Protocol, runtime_checkable
 

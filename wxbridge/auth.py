@@ -101,14 +101,14 @@ class WeixinAuth:
             "expired"   — 二维码多次过期，放弃
             "error"     — 网络异常或存储中无二维码
         """
-        for attempt in range(_QR_MAX_RETRY):
-            qrcode_token = await self._storage.get(WEIXIN_LOGIN_QR_TOKEN)
-            if not qrcode_token:
-                logger.warning("WeChat poll_login: 存储中无二维码，请先调用 start_login")
-                return "error"
+        tmp = ILinkClient(bot_token="", base_url=ILINK_BASE_URL)
+        async with httpx.AsyncClient() as client:
+            for attempt in range(_QR_MAX_RETRY):
+                qrcode_token = await self._storage.get(WEIXIN_LOGIN_QR_TOKEN)
+                if not qrcode_token:
+                    logger.warning("WeChat poll_login: 存储中无二维码，请先调用 start_login")
+                    return "error"
 
-            async with httpx.AsyncClient() as client:
-                tmp = ILinkClient(bot_token="", base_url=ILINK_BASE_URL)
                 while True:
                     try:
                         data = await tmp.poll_qrcode_status(client, qrcode_token)
