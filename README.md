@@ -1,0 +1,288 @@
+# WXBridge
+
+让**任何 AI 产品**都可以通过腾讯 iLink Bot API 接入微信个人号——而不仅仅是特定平台。
+
+WXBridge 负责全部微信协议细节（认证、长轮询、游标持久化、消息解析、发送），你只需实现一个方法：
+
+```
+微信用户
+    ↓ 发送消息
+腾讯 iLink Bot API  (长轮询，服务端 35s 超时)
+    ↓
+WeixinBridge  (核心循环)
+    ↓ 调用
+AIAdapter  ←──── 你只需实现此接口
+    ↓ 返回回复文本
+sendmessage → 微信用户
+```
+
+---
+
+## 安装
+
+```bash
+# 核心库（不含 Redis）
+pip install wxbridge
+
+# 含 Redis 支持（生产推荐）
+pip install "wxbridge[redis]"
+```
+
+> 需要 Python 3.10+
+
+---
+
+## 快速开始
+
+**第一步：实现 AI 适配器**
+
+```python
+from wxbridge import AIAdapter, WeixinMessage
+
+class MyAdapter(AIAdapter):
+    async def reply(self, message: WeixinMessage) -> str:
+        # message.text          — 用户文本（或语音转写结果）
+        # message.from_user_id  — 稳定的 iLink UID（用作用户唯一标识）
+        # message.session_id    — iLink 会话 ID（可选上下文）
+        return await my_ai.chat(message.from_user_id, message.text)
+```
+
+**第二步：启动桥接**
+
+```python
+import asyncio
+from wxbridge import WeixinBridge
+
+async def main():
+    bridge = WeixinBridge(adapter=MyAdapter(), redis_url="redis://localhost")
+
+    # 首次使用需要扫码登录
+    if not await bridge.auth.load_token():
+        qrcode_token, qrcode_img = await bridge.auth.start_login()
+        # 展示二维码（qrcode_img 是图片数据）
+        print(f"请扫描二维码")
+        await bridge.auth.poll_login()  # 等待用户扫码确认
+
+    await bridge.start()
+    await asyncio.Event().wait()  # 保持运行
+
+asyncio.run(main())
+```
+
+---
+
+## 工作原理
+
+### 长轮询消息接收
+
+WXBridge 通过 `/ilink/bot/getupdates` 接口长轮询（服务端最长 35 秒返回）。每次收到消息后：
+
+1. 持久化新游标到 Redis（服务重启后从断点继续，不丢消息）
+2. 过滤掉 Bot 自身发出的消息（`message_type=2`）
+3. 对每条用户消息创建独立的 `asyncio.Task`，并发调用 adapter.reply()
+
+### errcode=-14 处理
+
+iLink 返回 `errcode=-14` 表示 token 已过期。WXBridge 会：
+- 自动清除存储中的 token
+- 停止桥接循环
+- 你需要调用 `bridge.auth.start_login()` 重新扫码登录
+
+### 会话分割（session_ttl）
+
+微信没有显式的对话结束信号。`session_ttl`（默认 1 小时）决定空闲多久后视为新会话。这个参数仅传给 `WeixinMessage.session_id` 供适配器参考，桥接层本身不做强制分割。
+
+---
+
+## AIAdapter 接口
+
+```python
+from abc import ABC, abstractmethod
+from wxbridge import WeixinMessage
+
+class AIAdapter(ABC):
+    @abstractmethod
+    async def reply(self, message: WeixinMessage) -> str:
+        """
+        处理一条微信消息并返回回复文本。
+
+        message 字段：
+          message.text          str | None  — 用户文本或语音 STT 转写
+          message.from_user_id  str         — 稳定的 iLink UID（用作用户唯一标识）
+          message.session_id    str         — iLink 会话 ID
+          message.context_token str         — 由桥接层回传，适配器无需关心
+          message.message_id    str         — 消息唯一 ID
+          message.create_time_ms int        — 消息时间戳（毫秒）
+        """
+        ...
+```
+
+**支持的消息类型：**
+
+| `item.type` | 含义 | `message.text` |
+|---|---|---|
+| 1 | 文字消息 | 原文 |
+| 3 | 语音消息 | STT 转写文字 |
+| 2/4/5 | 图片/文件/视频 | None（当前跳过） |
+
+---
+
+## 登录流程
+
+微信登录通过扫描二维码完成，token 持久化到 Redis（重启后自动恢复，无需重新扫码）。
+
+```python
+from wxbridge import WeixinBridge
+
+bridge = WeixinBridge(adapter=MyAdapter())
+
+# 检查是否已登录
+if await bridge.auth.load_token():
+    print("已登录，直接启动")
+else:
+    # 申请二维码
+    qrcode_token, qrcode_img = await bridge.auth.start_login()
+    # qrcode_img 是二维码图片数据（URL 或 base64），展示给用户扫描
+
+    # 等待扫码确认（阻塞，自动处理过期重试）
+    status = await bridge.auth.poll_login()
+    # status: "confirmed" | "expired" | "error"
+
+# 查询当前登录状态
+status = await bridge.auth.get_login_status()
+# "pending" | "confirmed" | "failed" | "none"
+
+# 获取待扫描的二维码图片
+img = await bridge.auth.get_pending_qrcode_img()
+
+# 退出登录
+await bridge.auth.clear_token()
+```
+
+---
+
+## 存储后端
+
+WXBridge 使用可插拔存储后端持久化 token 和游标。
+
+### RedisStorage（生产默认）
+
+```python
+from wxbridge import WeixinBridge
+
+bridge = WeixinBridge(
+    adapter=MyAdapter(),
+    redis_url="redis://localhost:6379",  # 默认值
+)
+```
+
+### DictStorage（测试/开发）
+
+```python
+from wxbridge import WeixinBridge, DictStorage
+
+bridge = WeixinBridge(
+    adapter=MyAdapter(),
+    storage=DictStorage(),  # 纯内存，重启后丢失
+)
+```
+
+### 自定义存储后端
+
+实现 `Storage` Protocol：
+
+```python
+from wxbridge import Storage
+
+class MyStorage:
+    async def get(self, key: str) -> str | None: ...
+    async def set(self, key: str, value: str, ttl: int | None = None) -> None: ...
+    async def delete(self, *keys: str) -> None: ...
+    async def expire(self, key: str, ttl: int) -> None: ...
+```
+
+### Redis Key 规范
+
+| Key | 内容 | TTL |
+|---|---|---|
+| `weixin:bot_token` | iLink bot token | 永久 |
+| `weixin:bot_id` | iLink bot ID | 永久 |
+| `weixin:base_url` | 账号专属 API base URL | 永久 |
+| `weixin:cursor` | getupdates 游标 | 永久 |
+| `weixin:login:qrcode_token` | 当前二维码 token | 5 分钟 |
+| `weixin:login:qrcode_img` | 当前二维码图片 | 5 分钟 |
+| `weixin:login:status` | 登录状态 | 15 分钟 |
+
+---
+
+## 嵌入 Web 框架
+
+### FastAPI
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from wxbridge import WeixinBridge
+
+bridge = WeixinBridge(adapter=MyAdapter())
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await bridge.start()
+    yield
+    await bridge.stop()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.post("/weixin/login/start")
+async def login_start():
+    token, img = await bridge.auth.start_login()
+    return {"qrcode_token": token, "qrcode_img": img}
+
+@app.post("/weixin/login/confirm")
+async def login_confirm():
+    import asyncio
+    asyncio.create_task(bridge.auth.poll_login())
+    return {"status": "waiting"}
+
+@app.get("/weixin/login/status")
+async def login_status():
+    return {"status": await bridge.auth.get_login_status()}
+```
+
+---
+
+## 示例
+
+| 文件 | 说明 |
+|---|---|
+| [`examples/echo_adapter.py`](examples/echo_adapter.py) | 最简 echo 适配器，用于调试和验证接入 |
+| [`examples/openai_adapter.py`](examples/openai_adapter.py) | OpenAI ChatCompletion 适配器，支持多轮对话历史 |
+
+---
+
+## 开发
+
+```bash
+# 以可编辑模式安装（含开发依赖）
+pip install -e ".[dev]"
+
+# 运行全部测试
+pytest
+
+# 运行单个测试
+pytest tests/test_bridge.py::test_message_dispatch
+
+# 代码检查
+ruff check .
+ruff format .
+
+# 类型检查
+mypy wxbridge/
+```
+
+---
+
+## 许可证
+
+MIT License
