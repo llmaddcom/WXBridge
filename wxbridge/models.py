@@ -5,6 +5,7 @@ WXBridge 数据模型
 """
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from typing import Any, Union
 
@@ -65,8 +66,11 @@ class WeixinMessage(BaseModel):
 
     @property
     def media_items(self) -> list[MessageItem]:
-        """返回所有媒体条目（图片/文件/视频），不含语音（语音已 STT 转文字）"""
-        return [item for item in self.items if item.type in (2, 4, 5)]
+        """返回所有媒体条目（图片/文件/视频），以及已下载 SILK 音频的语音条目"""
+        return [
+            item for item in self.items
+            if item.type in (2, 4, 5) or (item.type == 3 and item.media_bytes is not None)
+        ]
 
 
 # ----------------------------------------------------------------
@@ -158,13 +162,23 @@ def parse_messages_from_raw(raw: list[dict[str, Any]]) -> list[WeixinMessage]:
                 items.append(MessageItem(type=t, text=text))
 
             elif t == 2:
-                # 图片：encrypt_query_param / aes_key 位于嵌套的 media 子对象内
+                # 图片：优先用顶层 image_item.aeskey（hex 字符串），转为 base64 统一格式；
+                # 降级用 media.aes_key（已是 base64(hex_string)）
+                # 参考：官方 SDK media-download.ts
                 img = item.get("image_item") or {}
                 media = img.get("media") or {}
+                top_aeskey_hex = img.get("aeskey")
+                if top_aeskey_hex:
+                    try:
+                        aes_key: str | None = base64.b64encode(bytes.fromhex(top_aeskey_hex)).decode()
+                    except (ValueError, TypeError):
+                        aes_key = media.get("aes_key")
+                else:
+                    aes_key = media.get("aes_key")
                 items.append(MessageItem(
                     type=t,
                     encrypt_query_param=media.get("encrypt_query_param") or img.get("encrypt_query_param"),
-                    aes_key=media.get("aes_key") or img.get("aes_key"),
+                    aes_key=aes_key,
                 ))
 
             elif t == 4:

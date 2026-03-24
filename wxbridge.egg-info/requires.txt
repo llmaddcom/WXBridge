@@ -8,6 +8,8 @@ ruff>=0.4
 mypy>=1.10
 redis[asyncio]>=5.0
 cryptography>=42.0
+fastapi>=0.110
+uvicorn[standard]>=0.29
 
 [full]
 redis[asyncio]>=5.0
@@ -18,3 +20,8 @@ cryptography>=42.0
 
 [redis]
 redis[asyncio]>=5.0
+
+[server]
+fastapi>=0.110
+uvicorn[standard]>=0.29
+cryptography>=42.0

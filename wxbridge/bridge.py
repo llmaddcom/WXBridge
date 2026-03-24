@@ -33,6 +33,25 @@ from .storage import WEIXIN_CURSOR, WEIXIN_SESSION_PREFIX, RedisStorage, Storage
 logger = logging.getLogger(__name__)
 
 
+async def _keepalive_typing(
+    client: httpx.AsyncClient,
+    ilink: ILinkClient,
+    to_user_id: str,
+    context_token: str,
+    typing_ticket: str,
+) -> None:
+    """每 5s 发一次 typing 状态，直到被取消（AI 回复完成后取消）"""
+    try:
+        while True:
+            try:
+                await ilink.sendtyping(client, to_user_id, context_token, typing_ticket, status=1)
+            except Exception as e:
+                logger.debug("WeChat bridge: sendtyping keepalive 失败 | error=%s", e)
+            await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        pass
+
+
 def _normalize_reply(raw: AdapterReply) -> Reply:
     """将适配器返回值统一为 Reply 对象"""
     if isinstance(raw, str):
@@ -239,12 +258,14 @@ class WeixinBridge:
         """
         async with self._semaphore:
             # 自动下载媒体
-            if self._auto_download_media and msg.media_items:
+            if self._auto_download_media and (msg.has_media or any(
+                item.type == 3 and not item.text for item in msg.items
+            )):
                 await self._download_media_items(http_client, ilink, msg)
 
             has_text = bool(msg.text)
             has_downloaded_media = any(
-                item.media_bytes is not None for item in msg.media_items
+                item.media_bytes is not None for item in msg.items
             )
 
             if not has_text and not has_downloaded_media:
@@ -283,6 +304,21 @@ class WeixinBridge:
                 await self._adapter.on_new_session(msg.from_user_id)
             await self._storage.set(session_key, "1", ttl=self._session_ttl)
 
+            # 获取 typing_ticket 并发送"正在输入"状态
+            typing_ticket: str | None = None
+            typing_task: asyncio.Task[None] | None = None
+            try:
+                config = await ilink.getconfig(http_client, msg.from_user_id, msg.context_token)
+                typing_ticket = config.get("typing_ticket")
+            except Exception as e:
+                logger.debug("WeChat bridge: getconfig 失败（typing 不可用）| error=%s", e)
+
+            if typing_ticket:
+                typing_task = asyncio.create_task(
+                    _keepalive_typing(http_client, ilink, msg.from_user_id, msg.context_token, typing_ticket),
+                    name=f"weixin_typing_{msg.message_id}",
+                )
+
             try:
                 raw_reply = await self._adapter.reply(msg)
                 reply = _normalize_reply(raw_reply)
@@ -304,6 +340,22 @@ class WeixinBridge:
                     e,
                     exc_info=True,
                 )
+            finally:
+                # 取消 typing keepalive，发送取消状态
+                if typing_task and not typing_task.done():
+                    typing_task.cancel()
+                    try:
+                        await typing_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                if typing_ticket:
+                    try:
+                        await ilink.sendtyping(
+                            http_client, msg.from_user_id, msg.context_token,
+                            typing_ticket, status=2,
+                        )
+                    except Exception as e:
+                        logger.debug("WeChat bridge: sendtyping cancel 失败 | error=%s", e)
 
     async def _download_media_items(
         self,
@@ -313,7 +365,13 @@ class WeixinBridge:
     ) -> None:
         """为消息中所有带 CDN 字段的媒体 item 下载内容到 item.media_bytes"""
         for item in msg.items:
-            if item.type not in (2, 4, 5):
+            # type=2/4/5：图片/文件/视频，总是下载
+            # type=3：语音，仅在 STT 转写失败（text 为空）时才下载 SILK 音频
+            if item.type in (2, 4, 5):
+                pass
+            elif item.type == 3 and not item.text:
+                pass  # 语音且无 STT 文字：需下载 SILK
+            else:
                 continue
             if not item.encrypt_query_param or not item.aes_key:
                 continue
@@ -365,7 +423,8 @@ class WeixinBridge:
                 media_type_int = MEDIA_TYPE_MAP.get(item.media_type, 4)
                 try:
                     item_dict = await upload_media(
-                        ilink, http_client, item.data, media_type_int, filename=item.filename
+                        ilink, http_client, item.data, media_type_int,
+                        filename=item.filename, to_user_id=msg.from_user_id,
                     )
                     ok = await ilink.sendmessage_items(
                         client=http_client,

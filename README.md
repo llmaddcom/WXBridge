@@ -358,6 +358,61 @@ async def health():
 | [`examples/openai_adapter.py`](examples/openai_adapter.py) | OpenAI ChatCompletion 适配器，支持多轮对话历史 |
 | [`examples/claude_adapter.py`](examples/claude_adapter.py) | Claude API 适配器，支持多轮对话历史 |
 | [`examples/media_adapter.py`](examples/media_adapter.py) | 媒体 echo 适配器，演示图片/文件接收与回传 |
+| [`examples/web_server.py`](examples/web_server.py) | 可视化调试面板（FastAPI），含扫码登录、消息实时查看、主动发送文本/图片/文件/视频 |
+
+---
+
+## 调试 Web 面板
+
+`examples/web_server.py` 是一个开箱即用的可视化调试工具，适合在接入初期快速验证整条链路——无需编写任何业务代码。
+
+### 功能
+
+- **扫码登录**：页面内直接扫码，token 自动持久化
+- **实时消息流**：SSE 推送，收发消息即时显示（含图片缩略图、文件信息）
+- **主动发送**：向任意已联系用户发送文本、图片、文件、视频
+- **Echo 模式**（可切换）：自动将用户消息原样回显，方便测试媒体传输
+- **Bridge 控制**：启动 / 停止 / 查看运行状态
+
+### 快速启动
+
+```bash
+# 安装依赖
+pip install 'wxbridge[media]' fastapi uvicorn
+
+# 启动（默认使用内存存储，重启后需重新扫码）
+python examples/web_server.py
+
+# 使用 Redis 持久化 token（推荐，重启后无需重新扫码）
+REDIS_URL=redis://localhost python examples/web_server.py
+
+# 自定义端口
+PORT=8080 python examples/web_server.py
+```
+
+启动后访问 `http://localhost:8000`，点击「获取登录二维码」完成扫码，即可开始收发消息。
+
+### API 端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/login/start` | 发起扫码登录，返回二维码图片（base64）|
+| `GET` | `/api/login/status` | 查询登录状态（`pending/confirmed/failed/none`） |
+| `GET` | `/api/login/qrcode` | 以 `image/png` 返回当前二维码 |
+| `POST` | `/api/logout` | 退出登录并停止 bridge |
+| `GET` | `/api/bridge/status` | 查看 bridge 运行状态、echo 模式、存储类型 |
+| `POST` | `/api/bridge/start` | 启动 bridge |
+| `POST` | `/api/bridge/stop` | 停止 bridge |
+| `POST` | `/api/bridge/echo` | 切换 echo 模式（`enabled=true/false`） |
+| `GET` | `/api/messages` | 返回内存中全部消息记录（JSON） |
+| `GET` | `/api/messages/stream` | SSE 实时消息流 |
+| `GET` | `/api/users` | 返回曾联系过的用户 ID 列表 |
+| `POST` | `/api/send/text` | 向用户发送文本（`to_user_id`, `text`） |
+| `POST` | `/api/send/media` | 向用户发送文件（`to_user_id`, `media_type`, `file`）|
+
+`/api/send/media` 的 `media_type` 可选值：`image`、`file`、`video`。
+
+> **注意**：主动发送需要目标用户先发过一条消息（用于获取 `context_token`）。
 
 ---
 

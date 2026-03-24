@@ -25,14 +25,24 @@ from .models import WeixinMessage, parse_messages_from_raw
 logger = logging.getLogger(__name__)
 
 ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
-CHANNEL_VERSION = "1.0.2"
+CHANNEL_VERSION = "2.0.1"
 
-# 媒体类型映射（字符串 → iLink API 整数）
+# 媒体类型映射（字符串 → sendmessage item_list type 整数）
 MEDIA_TYPE_MAP: dict[str, int] = {
     "image": 2,
     "voice": 3,
     "file": 4,
     "video": 5,
+}
+
+# sendmessage MessageItemType → getuploadurl UploadMediaType 映射
+# MessageItemType: 2=image, 3=voice, 4=file, 5=video
+# UploadMediaType: 1=image, 2=video, 3=file, 4=voice（来自官方 SDK types.ts）
+_MSG_TYPE_TO_UPLOAD_TYPE: dict[int, int] = {
+    2: 1,  # image
+    3: 4,  # voice
+    4: 3,  # file
+    5: 2,  # video
 }
 
 # 超时配置（秒）
@@ -43,7 +53,7 @@ _TIMEOUT_DEFAULT = 15
 _TIMEOUT_CDN = 60          # CDN 上传/下载可能较慢
 _TIMEOUT_TYPING = 10
 
-# 消息长度上限（保守值，避免 WeChat API 因超长消息报错）
+# 单条文本消息长度上限（分段发送时每段不超过此字符数）
 _MAX_MESSAGE_LENGTH = 2000
 
 
@@ -97,24 +107,37 @@ def _check_response(resp: httpx.Response) -> None:
 
 async def upload_to_cdn(
     client: httpx.AsyncClient,
-    upload_url: str,
+    upload_param: str,
+    filekey: str,
     encrypted_data: bytes,
-) -> None:
+) -> str:
     """
-    将 AES 加密后的媒体内容 PUT 上传到 CDN。
+    将 AES 加密后的媒体内容 POST 上传到 CDN。
 
     Args:
         client:         httpx 客户端
-        upload_url:     getuploadurl 返回的上传地址
+        upload_param:   getuploadurl 响应中的 upload_param 字符串（encrypted_query_param）
+        filekey:        本次上传的 filekey（UUID）
         encrypted_data: AES-128-ECB 加密后的字节
+
+    Returns:
+        CDN POST 响应头 x-encrypted-param（用作出站消息的 encrypt_query_param）
     """
-    resp = await client.put(
-        upload_url,
+    import urllib.parse
+    from .media import CDN_BASE_URL
+    cdn_url = (
+        f"{CDN_BASE_URL}/upload"
+        f"?encrypted_query_param={urllib.parse.quote(upload_param)}"
+        f"&filekey={urllib.parse.quote(filekey)}"
+    )
+    resp = await client.post(
+        cdn_url,
         content=encrypted_data,
         headers={"Content-Type": "application/octet-stream"},
         timeout=_TIMEOUT_CDN,
     )
     _check_response(resp)
+    return resp.headers.get("x-encrypted-param", "")
 
 
 async def upload_media(
@@ -123,24 +146,27 @@ async def upload_media(
     data: bytes,
     media_type_int: int,
     filename: str = "",
+    to_user_id: str = "",
 ) -> dict[str, Any]:
     """
-    完整媒体上传流程：生成密钥 → AES 加密 → getuploadurl → PUT CDN。
+    完整媒体上传流程：生成密钥 → AES 加密 → getuploadurl → POST CDN。
 
     Args:
         ilink:          ILinkClient 实例（用于调用 getuploadurl）
         client:         httpx 客户端
         data:           原始（未加密）媒体字节
-        media_type_int: 2=图片, 3=语音, 4=文件, 5=视频
+        media_type_int: sendmessage item type（2=图片, 3=语音, 4=文件, 5=视频）
         filename:       文件名（type=4 必填，其他可选）
+        to_user_id:     目标用户 iLink UID（getuploadurl 必填）
 
     Returns:
         可直接放入 sendmessage_items item_list 的字典，例如：
-        {"type": 2, "image_item": {"encrypt_query_param": "...", "aes_key": "..."}}
+        {"type": 2, "image_item": {"media": {"encrypt_query_param": "...", "aes_key": "..."}}}
     """
     from .media import (
         aes_encrypt,
         aes_key_to_b64,
+        aes_key_to_hex,
         generate_aes_key,
         md5_bytes,
         _require_cryptography,
@@ -148,45 +174,63 @@ async def upload_media(
     _require_cryptography()
 
     key = generate_aes_key()
-    aes_key_b64 = aes_key_to_b64(key)
+    aes_key_b64 = aes_key_to_b64(key)    # sendmessage media.aes_key 格式
+    aes_key_hex = aes_key_to_hex(key)    # getuploadurl aeskey 格式（官方 SDK）
     raw_md5 = md5_bytes(data)
     raw_size = len(data)
 
     encrypted = aes_encrypt(data, key)
     enc_size = len(encrypted)
 
+    # sendmessage MessageItemType → getuploadurl UploadMediaType 转换
+    upload_type = _MSG_TYPE_TO_UPLOAD_TYPE.get(media_type_int, 3)  # 默认 FILE=3
+
     filekey = str(uuid.uuid4())
     upload_info = await ilink.getuploadurl(
         client,
         filekey=filekey,
-        media_type=media_type_int,
+        media_type=upload_type,
+        to_user_id=to_user_id,
         raw_size=raw_size,
         raw_md5=raw_md5,
         encrypted_size=enc_size,
-        aes_key_b64=aes_key_b64,
+        aes_key_hex=aes_key_hex,
+        no_need_thumb=True,
     )
 
-    upload_param = upload_info.get("upload_param") or {}
-    upload_url = upload_param.get("upload_url", "")
-    if not upload_url:
-        raise ValueError(f"getuploadurl 返回空 upload_url，完整响应：{upload_info}")
+    # upload_param 是字符串（CDN 上传 encrypted_query_param），非 dict
+    upload_param_str = upload_info.get("upload_param") or ""
+    if not upload_param_str:
+        raise ValueError(f"getuploadurl 返回空 upload_param，完整响应：{upload_info}")
 
-    await upload_to_cdn(client, upload_url, encrypted)
+    # 从 CDN POST 响应头取 encrypt_query_param（官方 SDK cdn-upload.ts）
+    encrypt_query_param = await upload_to_cdn(client, upload_param_str, filekey, encrypted)
+    if not encrypt_query_param:
+        raise ValueError("CDN 上传响应缺少 x-encrypted-param 头")
 
-    encrypt_query_param = upload_param.get("encrypt_query_param", "")
-
-    # 构造 item 字典
+    # 构造 item 字典（media 子对象结构与入站一致）
     _type_to_field = {2: "image_item", 3: "voice_item", 4: "file_item", 5: "video_item"}
     field_name = _type_to_field.get(media_type_int, "file_item")
 
-    item_payload: dict[str, Any] = {
+    media_payload: dict[str, Any] = {
         "encrypt_query_param": encrypt_query_param,
         "aes_key": aes_key_b64,
+        "encrypt_type": 1,
     }
-    if filename:
-        item_payload["name"] = filename
+    item_inner: dict[str, Any] = {"media": media_payload}
+    if media_type_int == 2:
+        # image_item: mid_size = 密文大小（官方 SDK send.ts sendImageMessageWeixin）
+        item_inner["mid_size"] = enc_size
+    elif media_type_int == 5:
+        # video_item: video_size = 密文大小（官方 SDK send.ts sendVideoMessageWeixin）
+        item_inner["video_size"] = enc_size
+    elif media_type_int == 4:
+        # file_item: file_name + len 明文大小字符串（官方 SDK send.ts sendFileMessageWeixin）
+        if filename:
+            item_inner["file_name"] = filename
+        item_inner["len"] = str(raw_size)
 
-    return {"type": media_type_int, field_name: item_payload}
+    return {"type": media_type_int, field_name: item_inner}
 
 
 # ----------------------------------------------------------------
@@ -292,24 +336,28 @@ class ILinkClient:
         """
         发送文本消息（内部委托给 sendmessage_items）
 
+        超长文本自动分段发送（每段最多 _MAX_MESSAGE_LENGTH 字），不截断。
         context_token 必须从入站消息原样回传，否则微信无法关联对话。
 
         Returns:
-            True=发送成功，False=接口返回错误
+            True=全部分段成功，False=任一分段返回错误
         """
-        if len(text) > _MAX_MESSAGE_LENGTH:
-            logger.warning(
-                "sendmessage: 消息过长（%d 字），截断至 %d 字", len(text), _MAX_MESSAGE_LENGTH
-            )
-            text = text[:_MAX_MESSAGE_LENGTH]
+        chunks = [text[i:i + _MAX_MESSAGE_LENGTH] for i in range(0, len(text), _MAX_MESSAGE_LENGTH)]
+        if not chunks:
+            chunks = [text]
 
-        return await self.sendmessage_items(
-            client,
-            to_user_id=to_user_id,
-            context_token=context_token,
-            item_list=[{"type": 1, "text_item": {"text": text}}],
-            client_id=client_id,
-        )
+        ok = True
+        for chunk in chunks:
+            result = await self.sendmessage_items(
+                client,
+                to_user_id=to_user_id,
+                context_token=context_token,
+                item_list=[{"type": 1, "text_item": {"text": chunk}}],
+                client_id=client_id,
+            )
+            if not result:
+                ok = False
+        return ok
 
     async def download_media(
         self,
@@ -409,21 +457,25 @@ class ILinkClient:
         raw_size: int,
         raw_md5: str,
         encrypted_size: int,
-        aes_key_b64: str,
+        aes_key_hex: str,
+        to_user_id: str = "",
+        no_need_thumb: bool = True,
     ) -> dict[str, Any]:
         """
         申请 CDN 上传地址
 
         Args:
             filekey:        UUID，本次上传的唯一标识
-            media_type:     2=图片, 3=语音, 4=文件, 5=视频
+            media_type:     UploadMediaType（1=图片, 2=视频, 3=文件, 4=语音）
             raw_size:       未加密数据大小（字节）
             raw_md5:        未加密数据的 hex MD5
             encrypted_size: 加密后数据大小（字节）
-            aes_key_b64:    Base64 编码的 AES-128 密钥
+            aes_key_hex:    hex 字符串格式的 AES-128 密钥（官方 SDK cdn-upload.ts）
+            to_user_id:     目标用户 iLink UID（官方 SDK 必填）
+            no_need_thumb:  是否跳过缩略图上传 URL，默认 True
 
         Returns:
-            原始 API 响应，含 upload_param（包含 upload_url, encrypt_query_param）
+            原始 API 响应，upload_param 字段为字符串（CDN 上传 encrypted_query_param）
         """
         resp = await client.post(
             self._url("/ilink/bot/getuploadurl"),
@@ -431,10 +483,12 @@ class ILinkClient:
             json={
                 "filekey": filekey,
                 "media_type": media_type,
+                "to_user_id": to_user_id,
                 "rawsize": raw_size,
                 "rawfilemd5": raw_md5,
                 "filesize": encrypted_size,
-                "aeskey": aes_key_b64,
+                "no_need_thumb": no_need_thumb,
+                "aeskey": aes_key_hex,
                 "base_info": _base_info(),
             },
             timeout=_TIMEOUT_DEFAULT,

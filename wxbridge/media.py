@@ -35,8 +35,19 @@ def generate_aes_key() -> bytes:
 
 
 def aes_key_to_b64(key: bytes) -> str:
-    """将 AES 密钥编码为 Base64 字符串（API 传输格式）"""
-    return base64.b64encode(key).decode()
+    """
+    将 AES 密钥编码为 sendmessage media.aes_key 格式。
+
+    官方 SDK 格式：base64(hex_string.encode('utf-8'))
+    即先将 16 字节密钥转为 32 字符 hex 字符串，再作为 UTF-8 字节 base64 编码。
+    例：Buffer.from(aeskey.toString('hex')).toString('base64')
+    """
+    return base64.b64encode(key.hex().encode('utf-8')).decode()
+
+
+def aes_key_to_hex(key: bytes) -> str:
+    """将 AES 密钥编码为 hex 字符串（getuploadurl aeskey 字段格式）"""
+    return key.hex()
 
 
 def aes_key_from_b64(b64_key: str) -> bytes:
