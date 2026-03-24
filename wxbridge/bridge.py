@@ -248,17 +248,27 @@ class WeixinBridge:
             )
 
             if not has_text and not has_downloaded_media:
-                if msg.has_media and not self._auto_download_media:
-                    logger.debug(
-                        "WeChat bridge: 跳过媒体消息（auto_download_media=False）| from=%s",
-                        msg.from_user_id,
-                    )
-                else:
+                if not msg.has_media:
+                    # 真正的空消息（无文字、无媒体）→ 跳过
                     logger.debug(
                         "WeChat bridge: 跳过空消息 | from=%s",
                         msg.from_user_id,
                     )
-                return
+                    return
+                if not self._auto_download_media:
+                    # 有媒体但用户未开启自动下载 → 跳过（明确配置行为）
+                    logger.debug(
+                        "WeChat bridge: 跳过媒体消息（auto_download_media=False）| from=%s",
+                        msg.from_user_id,
+                    )
+                    return
+                # auto_download_media=True 但下载失败（CDN 字段缺失或网络错误）
+                # 仍调用 adapter，由 adapter 决定如何处理（media_bytes=None）
+                logger.warning(
+                    "WeChat bridge: 媒体下载失败，仍转发至 adapter | from=%s | media_count=%d",
+                    msg.from_user_id,
+                    len(msg.media_items),
+                )
 
             logger.info(
                 "WeChat bridge: 收到消息 | from=%s | text=%.80r | media=%d",

@@ -40,8 +40,26 @@ def aes_key_to_b64(key: bytes) -> str:
 
 
 def aes_key_from_b64(b64_key: str) -> bytes:
-    """将 Base64 字符串解码为 AES 密钥字节"""
-    return base64.b64decode(b64_key)
+    """
+    将 Base64 字符串解码为 AES-128 密钥字节（16 字节）。
+
+    WeChat CDN 存在两种编码格式（参考官方 SDK pic-decrypt.ts parseAesKey）：
+      - base64(原始 16 字节)          → 直接返回
+      - base64(32 字符 hex 字符串)    → 先 base64 解码得到 hex 字符串，再 hex 解码得到 16 字节
+    """
+    decoded = base64.b64decode(b64_key)
+    if len(decoded) == 16:
+        return decoded
+    if len(decoded) == 32:
+        try:
+            hex_str = decoded.decode("ascii")
+            if all(c in "0123456789abcdefABCDEF" for c in hex_str):
+                return bytes.fromhex(hex_str)
+        except (UnicodeDecodeError, ValueError):
+            pass
+    raise ValueError(
+        f"AES key 必须解码为 16 字节（原始）或 32 字符 hex 字符串，实际得到 {len(decoded)} 字节"
+    )
 
 
 def aes_encrypt(data: bytes, key: bytes) -> bytes:

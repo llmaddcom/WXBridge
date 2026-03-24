@@ -158,32 +158,35 @@ def parse_messages_from_raw(raw: list[dict[str, Any]]) -> list[WeixinMessage]:
                 items.append(MessageItem(type=t, text=text))
 
             elif t == 2:
-                # 图片
+                # 图片：encrypt_query_param / aes_key 位于嵌套的 media 子对象内
                 img = item.get("image_item") or {}
+                media = img.get("media") or {}
                 items.append(MessageItem(
                     type=t,
-                    encrypt_query_param=img.get("encrypt_query_param"),
-                    aes_key=img.get("aes_key"),
+                    encrypt_query_param=media.get("encrypt_query_param") or img.get("encrypt_query_param"),
+                    aes_key=media.get("aes_key") or img.get("aes_key"),
                 ))
 
             elif t == 4:
-                # 文件
+                # 文件：同样优先从 media 子对象取 CDN 字段
                 fi = item.get("file_item") or {}
+                media = fi.get("media") or {}
                 items.append(MessageItem(
                     type=t,
-                    encrypt_query_param=fi.get("encrypt_query_param"),
-                    aes_key=fi.get("aes_key"),
+                    encrypt_query_param=media.get("encrypt_query_param") or fi.get("encrypt_query_param"),
+                    aes_key=media.get("aes_key") or fi.get("aes_key"),
                     filename=fi.get("name"),
                     filesize=fi.get("rawsize"),
                 ))
 
             elif t == 5:
-                # 视频
+                # 视频：同样优先从 media 子对象取 CDN 字段
                 vi = item.get("video_item") or {}
+                media = vi.get("media") or {}
                 items.append(MessageItem(
                     type=t,
-                    encrypt_query_param=vi.get("encrypt_query_param"),
-                    aes_key=vi.get("aes_key"),
+                    encrypt_query_param=media.get("encrypt_query_param") or vi.get("encrypt_query_param"),
+                    aes_key=media.get("aes_key") or vi.get("aes_key"),
                 ))
 
             else:

@@ -321,7 +321,7 @@ class ILinkClient:
         从 CDN 下载并解密媒体文件。
 
         Args:
-            encrypt_query_param: 来自消息 item 的 CDN query string
+            encrypt_query_param: 来自消息 item 的 CDN query string（base64 编码）
             aes_key_b64:         来自消息 item 的 Base64 AES 密钥
 
         Returns:
@@ -331,7 +331,9 @@ class ILinkClient:
         _require_cryptography()
 
         from .media import CDN_BASE_URL
-        url = f"{CDN_BASE_URL}?{encrypt_query_param}"
+        import urllib.parse
+        # 官方 SDK cdn-url.ts：/download?encrypted_query_param={url_encoded_param}
+        url = f"{CDN_BASE_URL}/download?encrypted_query_param={urllib.parse.quote(encrypt_query_param)}"
         resp = await client.get(url, timeout=_TIMEOUT_CDN)
         _check_response(resp)
 

@@ -221,9 +221,22 @@ WXBridge 通过 `/ilink/bot/getupdates` 长轮询（服务端最长 35 秒返回
 
 ### 媒体传输流程
 
-**下载（入站）**：`encrypt_query_param` + `aes_key` → GET CDN → AES-128-ECB 解密 → `item.media_bytes`
+**下载（入站）**：
+
+```
+消息 JSON image_item.media.encrypt_query_param + aes_key
+    ↓
+GET https://novac2c.cdn.weixin.qq.com/c2c/download
+        ?encrypted_query_param={url_encoded_param}
+    ↓ 响应为 AES-128-ECB 加密字节
+AES-128-ECB 解密（需先将 aes_key 从 base64/hex 双重编码还原为 16 字节真实密钥）
+    ↓
+item.media_bytes（原始文件字节）
+```
 
 **上传（出站）**：`MediaReplyItem.data` → 生成随机 AES 密钥 → 加密 → `getuploadurl` 申请 URL → PUT CDN → `sendmessage` 携带 CDN 引用
+
+> **注意**：入站消息中 `encrypt_query_param` 和 `aes_key` 嵌套在 `image_item.media` 子对象内，而非 `image_item` 顶层。AES key 有两种编码：直接 base64 编码的 16 字节，或 base64 编码的 32 字符 hex 字符串（需再次 hex 解码）。
 
 ### errcode=-14 处理
 
@@ -345,6 +358,34 @@ async def health():
 | [`examples/openai_adapter.py`](examples/openai_adapter.py) | OpenAI ChatCompletion 适配器，支持多轮对话历史 |
 | [`examples/claude_adapter.py`](examples/claude_adapter.py) | Claude API 适配器，支持多轮对话历史 |
 | [`examples/media_adapter.py`](examples/media_adapter.py) | 媒体 echo 适配器，演示图片/文件接收与回传 |
+
+---
+
+## 官方 SDK 参考
+
+WXBridge 基于腾讯 iLink Bot 协议实现，协议细节参考官方 TypeScript SDK：
+
+```bash
+npx -y @tencent-weixin/openclaw-weixin-cli@latest install
+```
+
+### 官方 SDK 核心文件
+
+| 文件 | 说明 |
+|---|---|
+| `src/auth/accounts.ts` | 定义 `CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"` 和 `DEFAULT_BASE_URL` |
+| `src/cdn/cdn-url.ts` | CDN URL 构造：`/download?encrypted_query_param=...` 和 `/upload?...` |
+| `src/cdn/pic-decrypt.ts` | 下载+解密，含 `parseAesKey()`（处理两种 key 编码格式） |
+| `src/cdn/cdn-upload.ts` | 上传，download param 来自响应头 `x-encrypted-param` |
+| `src/media/media-download.ts` | 按消息 item 类型分发下载逻辑，图片优先用 `image_item.aeskey`（hex）|
+| `src/monitor/monitor.ts` | 长轮询主循环 |
+| `src/messaging/process-message.ts` | 单条消息处理主流程 |
+
+### 已知协议坑点（调试记录）
+
+1. **`encrypt_query_param` 在 `media` 子对象内**：入站消息中该字段嵌套于 `image_item.media.encrypt_query_param`，不在 `image_item` 顶层。
+2. **CDN 下载路径是 `/c2c/download`**：完整 URL = `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param={url_encoded}`，`encrypt_query_param` 直接 URL 编码使用，不需要 base64 解码。
+3. **AES key 双重编码**：`media.aes_key` 是 `base64(hex_string)` 格式（不是 `base64(raw_bytes)`），解密前需先 base64 decode 得到 hex 字符串，再 hex decode 得到真正的 16 字节密钥。
 
 ---
 

@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: wxbridge
-Version: 0.3.0
+Version: 0.3.4
 Summary: Connect any AI product to WeChat personal accounts via Tencent iLink Bot API
 License-Expression: MIT
 Project-URL: Homepage, https://github.com/your-org/wxbridge
