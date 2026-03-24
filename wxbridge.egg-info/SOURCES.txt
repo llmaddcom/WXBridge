@@ -3,6 +3,7 @@ pyproject.toml
 tests/test_auth.py
 tests/test_bridge.py
 tests/test_ilink_client.py
+tests/test_integration.py
 tests/test_models.py
 tests/test_storage.py
 wxbridge/__init__.py
@@ -10,6 +11,7 @@ wxbridge/adapter.py
 wxbridge/auth.py
 wxbridge/bridge.py
 wxbridge/ilink_client.py
+wxbridge/media.py
 wxbridge/models.py
 wxbridge/storage.py
 wxbridge.egg-info/PKG-INFO

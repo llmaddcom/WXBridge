@@ -18,6 +18,7 @@ WEIXIN_CURSOR = "weixin:cursor"
 WEIXIN_LOGIN_QR_TOKEN = "weixin:login:qrcode_token"
 WEIXIN_LOGIN_QR_IMG = "weixin:login:qrcode_img"
 WEIXIN_LOGIN_STATUS = "weixin:login:status"
+WEIXIN_SESSION_PREFIX = "weixin:session:"
 
 
 @runtime_checkable
@@ -31,6 +32,12 @@ class Storage(Protocol):
     async def delete(self, *keys: str) -> None: ...
 
     async def expire(self, key: str, ttl: int) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def __aenter__(self) -> Storage: ...
+
+    async def __aexit__(self, *_: object) -> None: ...
 
 
 class DictStorage:
@@ -68,6 +75,15 @@ class DictStorage:
             value, _ = entry
             self._store[key] = (value, time.monotonic() + ttl)
 
+    async def close(self) -> None:
+        pass
+
+    async def __aenter__(self) -> DictStorage:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        pass
+
 
 class RedisStorage:
     """
@@ -104,3 +120,9 @@ class RedisStorage:
 
     async def close(self) -> None:
         await self._redis.aclose()
+
+    async def __aenter__(self) -> RedisStorage:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()

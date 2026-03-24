@@ -15,15 +15,15 @@ import logging
 
 import httpx
 
-from .ilink_client import ILinkClient, ILINK_BASE_URL
+from .ilink_client import ILINK_BASE_URL, ILinkClient
 from .storage import (
-    Storage,
-    WEIXIN_BOT_TOKEN,
-    WEIXIN_BOT_ID,
     WEIXIN_BASE_URL,
-    WEIXIN_LOGIN_QR_TOKEN,
+    WEIXIN_BOT_ID,
+    WEIXIN_BOT_TOKEN,
     WEIXIN_LOGIN_QR_IMG,
+    WEIXIN_LOGIN_QR_TOKEN,
     WEIXIN_LOGIN_STATUS,
+    Storage,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,51 @@ class WeixinAuth:
         logger.info("WeChat 登录二维码已生成，等待用户扫码...")
         return qrcode_token, img
 
+    async def _poll_until_terminal(
+        self,
+        client: httpx.AsyncClient,
+        tmp: ILinkClient,
+        qrcode_token: str,
+    ) -> str:
+        """
+        轮询二维码状态直到终态。
+
+        Returns:
+            "confirmed" — 扫码成功，token 已写入存储
+            "expired"   — 二维码已过期（调用方可重新申请）
+            "error"     — 网络异常或未知状态
+        """
+        while True:
+            try:
+                data = await tmp.poll_qrcode_status(client, qrcode_token)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("WeChat 登录轮询异常: %s", e)
+                await self._storage.set(WEIXIN_LOGIN_STATUS, "failed")
+                return "error"
+
+            status = data.get("status", "wait")
+
+            if status == "confirmed":
+                await self.save_token(
+                    bot_token=data["bot_token"],
+                    bot_id=data.get("ilink_bot_id", ""),
+                    base_url=data.get("baseurl") or ILINK_BASE_URL,
+                )
+                await self._storage.set(WEIXIN_LOGIN_STATUS, "confirmed")
+                return "confirmed"
+
+            if status == "expired":
+                return "expired"
+
+            if status in ("wait", "scaned"):
+                await asyncio.sleep(2)
+            else:
+                logger.warning("WeChat 登录未知状态: %s", status)
+                await self._storage.set(WEIXIN_LOGIN_STATUS, "failed")
+                return "error"
+
     async def poll_login(self) -> str:
         """
         等待扫码确认（阻塞，直到成功/失败）
@@ -109,43 +154,16 @@ class WeixinAuth:
                     logger.warning("WeChat poll_login: 存储中无二维码，请先调用 start_login")
                     return "error"
 
-                while True:
-                    try:
-                        data = await tmp.poll_qrcode_status(client, qrcode_token)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        logger.warning("WeChat 登录轮询异常: %s", e)
-                        await self._storage.set(WEIXIN_LOGIN_STATUS, "failed")
-                        return "error"
+                result = await self._poll_until_terminal(client, tmp, qrcode_token)
+                if result != "expired":
+                    return result
 
-                    status = data.get("status", "wait")
-
-                    if status == "confirmed":
-                        await self.save_token(
-                            bot_token=data["bot_token"],
-                            bot_id=data.get("ilink_bot_id", ""),
-                            base_url=data.get("baseurl") or ILINK_BASE_URL,
-                        )
-                        await self._storage.set(WEIXIN_LOGIN_STATUS, "confirmed")
-                        return "confirmed"
-
-                    elif status == "expired":
-                        logger.info(
-                            "WeChat 二维码已过期，重新申请（第 %d/%d 次）",
-                            attempt + 1,
-                            _QR_MAX_RETRY,
-                        )
-                        qrcode_token, _ = await self.start_login()
-                        break  # 跳出内层循环用新 token 继续
-
-                    elif status in ("wait", "scaned"):
-                        await asyncio.sleep(2)
-
-                    else:
-                        logger.warning("WeChat 登录未知状态: %s", status)
-                        await self._storage.set(WEIXIN_LOGIN_STATUS, "failed")
-                        return "error"
+                logger.info(
+                    "WeChat 二维码已过期，重新申请（第 %d/%d 次）",
+                    attempt + 1,
+                    _QR_MAX_RETRY,
+                )
+                qrcode_token, _ = await self.start_login()
 
         await self._storage.set(WEIXIN_LOGIN_STATUS, "failed")
         return "expired"

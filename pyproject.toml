@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wxbridge"
-version = "0.1.4"
+version = "0.3.0"
 description = "Connect any AI product to WeChat personal accounts via Tencent iLink Bot API"
 readme = "README.md"
 license = "MIT"
@@ -16,12 +16,15 @@ dependencies = [
 
 [project.optional-dependencies]
 redis = ["redis[asyncio]>=5.0"]
+media = ["cryptography>=42.0"]
+full  = ["redis[asyncio]>=5.0", "cryptography>=42.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
     "mypy>=1.10",
     "redis[asyncio]>=5.0",
+    "cryptography>=42.0",
 ]
 
 [project.urls]
