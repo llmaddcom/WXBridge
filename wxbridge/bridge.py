@@ -85,19 +85,22 @@ class WeixinBridge:
         session_ttl: int = 3600,
         max_concurrent_tasks: int = 10,
         auto_download_media: bool = False,
+        key_prefix: str = "",
     ) -> None:
         """
         Args:
             adapter:              AI 适配器实例（实现了 reply() 方法）
-            storage:              存储后端；None 时自动创建 RedisStorage(redis_url)
+            storage:              存储后端；None 时自动创建 RedisStorage(redis_url, key_prefix)
             redis_url:            Redis 连接 URL（storage=None 时有效）
             session_ttl:          会话空闲 TTL（秒），超时后下一条消息开新会话（默认 1 小时）
             max_concurrent_tasks: 最大并发消息处理数（默认 10）
             auto_download_media:  True 时在调用 adapter 前自动下载媒体到 item.media_bytes
                                   需要安装 cryptography：pip install 'wxbridge[media]'
+            key_prefix:           Redis key 前缀，用于多账号隔离，如 "wxbridge:bot_a:"
+                                  storage=None 时生效；传入自定义 storage 时忽略此参数
         """
         self._adapter = adapter
-        self._storage: Storage = storage if storage is not None else RedisStorage(redis_url)
+        self._storage: Storage = storage if storage is not None else RedisStorage(redis_url, key_prefix=key_prefix)
         self._session_ttl = session_ttl
         self._auth = WeixinAuth(self._storage)
         self._task: asyncio.Task[None] | None = None

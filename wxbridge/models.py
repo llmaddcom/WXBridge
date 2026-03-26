@@ -189,7 +189,7 @@ def parse_messages_from_raw(raw: list[dict[str, Any]]) -> list[WeixinMessage]:
                     type=t,
                     encrypt_query_param=media.get("encrypt_query_param") or fi.get("encrypt_query_param"),
                     aes_key=media.get("aes_key") or fi.get("aes_key"),
-                    filename=fi.get("name"),
+                    filename=fi.get("file_name") or fi.get("name"),
                     filesize=fi.get("rawsize"),
                 ))
 

@@ -45,35 +45,40 @@ class DictStorage:
     纯内存存储，用于测试和无 Redis 场景。
 
     TTL 通过 (value, expire_at) 元组实现，get 时惰性检查是否过期。
+    支持 key_prefix 实现多账号隔离（与 RedisStorage 行为一致）。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, key_prefix: str = "") -> None:
         # key → (value, expire_at_monotonic | None)
         self._store: dict[str, tuple[str, float | None]] = {}
+        self._prefix = key_prefix
+
+    def _k(self, key: str) -> str:
+        return self._prefix + key if self._prefix else key
 
     async def get(self, key: str) -> str | None:
-        entry = self._store.get(key)
+        entry = self._store.get(self._k(key))
         if entry is None:
             return None
         value, expire_at = entry
         if expire_at is not None and time.monotonic() > expire_at:
-            del self._store[key]
+            del self._store[self._k(key)]
             return None
         return value
 
     async def set(self, key: str, value: str, ttl: int | None = None) -> None:
         expire_at = time.monotonic() + ttl if ttl is not None else None
-        self._store[key] = (value, expire_at)
+        self._store[self._k(key)] = (value, expire_at)
 
     async def delete(self, *keys: str) -> None:
         for key in keys:
-            self._store.pop(key, None)
+            self._store.pop(self._k(key), None)
 
     async def expire(self, key: str, ttl: int) -> None:
-        entry = self._store.get(key)
+        entry = self._store.get(self._k(key))
         if entry is not None:
             value, _ = entry
-            self._store[key] = (value, time.monotonic() + ttl)
+            self._store[self._k(key)] = (value, time.monotonic() + ttl)
 
     async def close(self) -> None:
         pass
@@ -90,9 +95,10 @@ class RedisStorage:
     Redis 存储后端（生产环境）。
 
     需安装：pip install "wxbridge[redis]" 或 pip install redis[asyncio]
+    支持 key_prefix 实现多账号 Redis key 隔离，如 key_prefix="wxbridge:bot_a:"。
     """
 
-    def __init__(self, redis_url: str = "redis://localhost") -> None:
+    def __init__(self, redis_url: str = "redis://localhost", key_prefix: str = "") -> None:
         try:
             import redis.asyncio as aioredis
         except ImportError as exc:
@@ -101,22 +107,27 @@ class RedisStorage:
                 "Install with: pip install 'wxbridge[redis]'"
             ) from exc
         self._redis = aioredis.from_url(redis_url, decode_responses=True)
+        self._prefix = key_prefix
+
+    def _k(self, key: str) -> str:
+        # 所有 key 加命名空间前缀，实现多账号 Redis key 隔离
+        return self._prefix + key if self._prefix else key
 
     async def get(self, key: str) -> str | None:
-        return await self._redis.get(key)  # type: ignore[return-value]
+        return await self._redis.get(self._k(key))  # type: ignore[return-value]
 
     async def set(self, key: str, value: str, ttl: int | None = None) -> None:
         if ttl is not None:
-            await self._redis.setex(key, ttl, value)
+            await self._redis.setex(self._k(key), ttl, value)
         else:
-            await self._redis.set(key, value)
+            await self._redis.set(self._k(key), value)
 
     async def delete(self, *keys: str) -> None:
         if keys:
-            await self._redis.delete(*keys)
+            await self._redis.delete(*[self._k(k) for k in keys])
 
     async def expire(self, key: str, ttl: int) -> None:
-        await self._redis.expire(key, ttl)
+        await self._redis.expire(self._k(key), ttl)
 
     async def close(self) -> None:
         await self._redis.aclose()
