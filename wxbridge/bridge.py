@@ -227,6 +227,7 @@ class WeixinBridge:
                             "正在清除 token，请重新调用 auth.start_login() 扫码登录"
                         )
                         await self._auth.clear_token()
+                        await self._adapter.on_session_expired()
                         self._running = False
                         return
 

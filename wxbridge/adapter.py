@@ -57,6 +57,14 @@ class AIAdapter(ABC):
         可覆写以重置对话历史、日志记录等。
         """
 
+    async def on_session_expired(self) -> None:
+        """
+        iLink session 过期（errcode=-14）时调用（默认 no-op）。
+
+        token 已失效，bridge 即将停止。可覆写以更新 DB 状态、清除缓存、
+        通知用户重新扫码等。
+        """
+
 
 @runtime_checkable
 class AIAdapterProtocol(Protocol):
