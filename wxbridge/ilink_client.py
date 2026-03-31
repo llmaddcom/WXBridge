@@ -287,6 +287,7 @@ class ILinkClient:
         context_token: str,
         item_list: list[dict[str, Any]],
         client_id: str | None = None,
+        suppress_empty_token_warn: bool = False,
     ) -> bool:
         """
         通用 sendmessage，支持任意 item_list（文本、图片、文件、视频等）。
@@ -295,11 +296,13 @@ class ILinkClient:
 
         Args:
             item_list: 符合 iLink API 格式的条目列表
+            suppress_empty_token_warn: 调用方故意传空 context_token 时设为 True，
+                                       避免产生误导性 WARNING（如任务汇报推送场景）。
 
         Returns:
             True=成功，False=接口返回错误
         """
-        if not context_token:
+        if not context_token and not suppress_empty_token_warn:
             logger.warning("sendmessage_items: context_token 为空，消息可能无法关联")
 
         resp = await client.post(
