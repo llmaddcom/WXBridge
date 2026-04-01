@@ -84,4 +84,4 @@ def configure_logging(level: int = _logging.INFO) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-__version__ = "0.4.2"
+__version__ = "0.4.4"
