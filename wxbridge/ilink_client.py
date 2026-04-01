@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import random
 import uuid
 from typing import Any
@@ -105,39 +106,71 @@ def _check_response(resp: httpx.Response) -> None:
 # 模块级 CDN 辅助函数
 # ----------------------------------------------------------------
 
+_CDN_UPLOAD_MAX_RETRIES = 3
+
+
 async def upload_to_cdn(
     client: httpx.AsyncClient,
-    upload_param: str,
-    filekey: str,
     encrypted_data: bytes,
+    upload_full_url: str = "",
+    upload_param: str = "",
+    filekey: str = "",
 ) -> str:
     """
-    将 AES 加密后的媒体内容 POST 上传到 CDN。
+    将 AES 加密后的媒体内容 POST 上传到 CDN，失败时自动重试（最多 3 次）。
 
     Args:
-        client:         httpx 客户端
-        upload_param:   getuploadurl 响应中的 upload_param 字符串（encrypted_query_param）
-        filekey:        本次上传的 filekey（UUID）
-        encrypted_data: AES-128-ECB 加密后的字节
+        client:           httpx 客户端
+        encrypted_data:   AES-128-ECB 加密后的字节
+        upload_full_url:  getuploadurl 响应中的 upload_full_url（预签名直链，优先使用）
+        upload_param:     getuploadurl 响应中的 upload_param（fallback）
+        filekey:          本次上传的 filekey（upload_param 路径时必填）
 
     Returns:
         CDN POST 响应头 x-encrypted-param（用作出站消息的 encrypt_query_param）
     """
     import urllib.parse
     from .media import CDN_BASE_URL
-    cdn_url = (
-        f"{CDN_BASE_URL}/upload"
-        f"?encrypted_query_param={urllib.parse.quote(upload_param)}"
-        f"&filekey={urllib.parse.quote(filekey)}"
-    )
-    resp = await client.post(
-        cdn_url,
-        content=encrypted_data,
-        headers={"Content-Type": "application/octet-stream"},
-        timeout=_TIMEOUT_CDN,
-    )
-    _check_response(resp)
-    return resp.headers.get("x-encrypted-param", "")
+
+    trimmed_full = upload_full_url.strip() if upload_full_url else ""
+    if trimmed_full:
+        cdn_url = trimmed_full
+    elif upload_param:
+        cdn_url = (
+            f"{CDN_BASE_URL}/upload"
+            f"?encrypted_query_param={urllib.parse.quote(upload_param)}"
+            f"&filekey={urllib.parse.quote(filekey)}"
+        )
+    else:
+        raise ValueError("upload_to_cdn: 需要 upload_full_url 或 upload_param")
+
+    last_error: Exception | None = None
+    for attempt in range(1, _CDN_UPLOAD_MAX_RETRIES + 1):
+        try:
+            resp = await client.post(
+                cdn_url,
+                content=encrypted_data,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=_TIMEOUT_CDN,
+            )
+            if 400 <= resp.status_code < 500:
+                err_msg = resp.headers.get("x-error-message") or resp.text
+                raise ILinkHTTPError(resp.status_code, f"CDN 上传客户端错误 {resp.status_code}: {err_msg}")
+            _check_response(resp)
+            download_param = resp.headers.get("x-encrypted-param", "")
+            if not download_param:
+                raise ValueError("CDN 上传响应缺少 x-encrypted-param 头")
+            return download_param
+        except ILinkHTTPError:
+            raise  # 4xx 不重试，直接上抛
+        except Exception as e:
+            last_error = e
+            if attempt < _CDN_UPLOAD_MAX_RETRIES:
+                logger.warning("CDN 上传失败（第 %d 次），重试... error=%s", attempt, e)
+            else:
+                logger.error("CDN 上传全部 %d 次尝试均失败 error=%s", _CDN_UPLOAD_MAX_RETRIES, e)
+
+    raise last_error or ValueError("CDN 上传失败")
 
 
 async def upload_media(
@@ -185,7 +218,8 @@ async def upload_media(
     # sendmessage MessageItemType → getuploadurl UploadMediaType 转换
     upload_type = _MSG_TYPE_TO_UPLOAD_TYPE.get(media_type_int, 3)  # 默认 FILE=3
 
-    filekey = str(uuid.uuid4())
+    # 官方 SDK 使用 randomBytes(16).toString("hex") 作为 filekey（32 字符 hex）
+    filekey = os.urandom(16).hex()
     upload_info = await ilink.getuploadurl(
         client,
         filekey=filekey,
@@ -198,13 +232,20 @@ async def upload_media(
         no_need_thumb=True,
     )
 
-    # upload_param 是字符串（CDN 上传 encrypted_query_param），非 dict
+    # 官方 SDK 优先使用 upload_full_url（预签名直链），fallback 到 upload_param
+    upload_full_url = (upload_info.get("upload_full_url") or "").strip()
     upload_param_str = upload_info.get("upload_param") or ""
-    if not upload_param_str:
-        raise ValueError(f"getuploadurl 返回空 upload_param，完整响应：{upload_info}")
+    if not upload_full_url and not upload_param_str:
+        raise ValueError(f"getuploadurl 未返回可用上传 URL，完整响应：{upload_info}")
 
     # 从 CDN POST 响应头取 encrypt_query_param（官方 SDK cdn-upload.ts）
-    encrypt_query_param = await upload_to_cdn(client, upload_param_str, filekey, encrypted)
+    encrypt_query_param = await upload_to_cdn(
+        client,
+        encrypted_data=encrypted,
+        upload_full_url=upload_full_url,
+        upload_param=upload_param_str,
+        filekey=filekey,
+    )
     if not encrypt_query_param:
         raise ValueError("CDN 上传响应缺少 x-encrypted-param 头")
 

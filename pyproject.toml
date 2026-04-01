@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wxbridge"
-version = "0.4.4"
+version = "0.5.0"
 description = "Connect any AI product to WeChat personal accounts via Tencent iLink Bot API"
 readme = "README.md"
 license = "MIT"
